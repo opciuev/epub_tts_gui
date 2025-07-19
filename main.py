@@ -1,0 +1,343 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import os
+import asyncio
+import threading
+from epub_converter import EpubToTTS
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    DND_AVAILABLE = True
+except ImportError:
+    DND_AVAILABLE = False
+
+class EpubTTSGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("EPUB转TTS工具")
+        self.root.geometry("900x700")
+        
+        self.epub_path = ""
+        self.output_path = ""
+        self.converter = None
+        self.is_running = False
+        self.is_paused = False
+        self.chapters = []
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        # 文件选择区域
+        file_frame = ttk.Frame(self.root, padding="10")
+        file_frame.pack(fill=tk.X)
+        
+        ttk.Label(file_frame, text="EPUB文件:").pack(anchor=tk.W)
+        
+        file_input_frame = ttk.Frame(file_frame)
+        file_input_frame.pack(fill=tk.X, pady=5)
+        
+        self.file_var = tk.StringVar()
+        self.file_entry = ttk.Entry(file_input_frame, textvariable=self.file_var, state="readonly")
+        self.file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        ttk.Button(file_input_frame, text="选择文件", command=self.select_file).pack(side=tk.RIGHT, padx=(5,0))
+        
+        # 拖拽提示
+        if DND_AVAILABLE:
+            ttk.Label(file_frame, text="提示: 可以直接拖拽EPUB文件到输入框", font=("", 8)).pack(anchor=tk.W)
+        
+        # 输出路径区域
+        output_frame = ttk.Frame(self.root, padding="10")
+        output_frame.pack(fill=tk.X)
+        
+        ttk.Label(output_frame, text="输出路径:").pack(anchor=tk.W)
+        
+        output_input_frame = ttk.Frame(output_frame)
+        output_input_frame.pack(fill=tk.X, pady=5)
+        
+        self.output_var = tk.StringVar()
+        self.output_entry = ttk.Entry(output_input_frame, textvariable=self.output_var)
+        self.output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        ttk.Button(output_input_frame, text="选择路径", command=self.select_output).pack(side=tk.RIGHT, padx=(5,0))
+        
+        # 同目录选项
+        self.same_dir_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(output_frame, text="在EPUB同目录下创建同名文件夹", 
+                       variable=self.same_dir_var, command=self.toggle_same_dir).pack(anchor=tk.W, pady=5)
+        
+        # 章节选择区域
+        chapter_frame = ttk.LabelFrame(self.root, text="章节选择", padding="10")
+        chapter_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # 全选/取消全选按钮
+        select_frame = ttk.Frame(chapter_frame)
+        select_frame.pack(fill=tk.X, pady=(0,5))
+        
+        ttk.Button(select_frame, text="全选", command=self.select_all_chapters).pack(side=tk.LEFT, padx=(0,5))
+        ttk.Button(select_frame, text="取消全选", command=self.deselect_all_chapters).pack(side=tk.LEFT)
+        
+        # 章节列表
+        list_container = ttk.Frame(chapter_frame)
+        list_container.pack(fill=tk.BOTH, expand=True)
+        
+        # 创建Treeview显示章节
+        columns = ("选择", "章节", "状态")
+        self.chapter_tree = ttk.Treeview(list_container, columns=columns, show="headings", height=12)
+        
+        self.chapter_tree.heading("选择", text="选择")
+        self.chapter_tree.heading("章节", text="章节")
+        self.chapter_tree.heading("状态", text="状态")
+        
+        self.chapter_tree.column("选择", width=60)
+        self.chapter_tree.column("章节", width=500)
+        self.chapter_tree.column("状态", width=100)
+        
+        # 滚动条
+        chapter_scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.chapter_tree.yview)
+        self.chapter_tree.configure(yscrollcommand=chapter_scrollbar.set)
+        
+        self.chapter_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        chapter_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 绑定双击事件切换选择状态
+        self.chapter_tree.bind("<Double-1>", self.toggle_chapter_selection)
+        
+        # 控制按钮区域
+        control_frame = ttk.Frame(self.root, padding="10")
+        control_frame.pack(fill=tk.X)
+        
+        self.start_btn = ttk.Button(control_frame, text="开始转换", command=self.start_conversion)
+        self.start_btn.pack(side=tk.LEFT, padx=(0,5))
+        
+        self.pause_btn = ttk.Button(control_frame, text="暂停", command=self.pause_conversion, state="disabled")
+        self.pause_btn.pack(side=tk.LEFT, padx=(0,5))
+        
+        self.continue_btn = ttk.Button(control_frame, text="继续", command=self.continue_conversion, state="disabled")
+        self.continue_btn.pack(side=tk.LEFT, padx=(0,5))
+        
+        self.restart_btn = ttk.Button(control_frame, text="从头开始", command=self.restart_conversion)
+        self.restart_btn.pack(side=tk.LEFT, padx=(0,5))
+        
+        self.stop_btn = ttk.Button(control_frame, text="结束", command=self.stop_conversion, state="disabled")
+        self.stop_btn.pack(side=tk.LEFT)
+        
+        # 进度条
+        progress_frame = ttk.Frame(self.root, padding="10")
+        progress_frame.pack(fill=tk.X)
+        
+        ttk.Label(progress_frame, text="转换进度:").pack(anchor=tk.W)
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, maximum=100)
+        self.progress_bar.pack(fill=tk.X, pady=5)
+        
+        self.progress_label = ttk.Label(progress_frame, text="0/0")
+        self.progress_label.pack(anchor=tk.W)
+        
+        # 设置拖拽支持
+        if DND_AVAILABLE:
+            self.file_entry.drop_target_register(DND_FILES)
+            self.file_entry.dnd_bind('<<Drop>>', self.on_drop)
+    
+    def select_file(self):
+        file_path = filedialog.askopenfilename(
+            title="选择EPUB文件",
+            filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
+        )
+        if file_path:
+            self.load_epub_file(file_path)
+    
+    def load_epub_file(self, file_path):
+        self.file_var.set(file_path)
+        self.epub_path = file_path
+        if self.same_dir_var.get():
+            self.set_same_dir_output()
+        
+        # 加载章节列表
+        self.load_chapters()
+    
+    def load_chapters(self):
+        """加载EPUB章节列表"""
+        try:
+            temp_converter = EpubToTTS(self.epub_path, "temp")
+            self.chapters = temp_converter.get_toc_structure()
+            
+            # 清空现有列表
+            for item in self.chapter_tree.get_children():
+                self.chapter_tree.delete(item)
+            
+            # 添加章节到列表
+            for chapter in self.chapters:
+                self.chapter_tree.insert("", "end", values=("☑", chapter['title'], "待转换"))
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"读取EPUB章节失败: {str(e)}")
+    
+    def select_all_chapters(self):
+        """全选章节"""
+        for item in self.chapter_tree.get_children():
+            values = list(self.chapter_tree.item(item)["values"])
+            values[0] = "☑"
+            self.chapter_tree.item(item, values=values)
+    
+    def deselect_all_chapters(self):
+        """取消全选章节"""
+        for item in self.chapter_tree.get_children():
+            values = list(self.chapter_tree.item(item)["values"])
+            values[0] = "☐"
+            self.chapter_tree.item(item, values=values)
+    
+    def toggle_chapter_selection(self, event):
+        """切换章节选择状态"""
+        item = self.chapter_tree.selection()[0]
+        values = list(self.chapter_tree.item(item)["values"])
+        values[0] = "☐" if values[0] == "☑" else "☑"
+        self.chapter_tree.item(item, values=values)
+    
+    def get_selected_chapters(self):
+        """获取选中的章节"""
+        selected_chapters = []
+        for i, item in enumerate(self.chapter_tree.get_children()):
+            values = self.chapter_tree.item(item)["values"]
+            if values[0] == "☑":
+                selected_chapters.append(self.chapters[i])
+        return selected_chapters
+    
+    def select_output(self):
+        if self.same_dir_var.get():
+            return
+        
+        dir_path = filedialog.askdirectory(title="选择输出目录")
+        if dir_path:
+            self.output_var.set(dir_path)
+            self.output_path = dir_path
+    
+    def toggle_same_dir(self):
+        if self.same_dir_var.get():
+            self.output_entry.config(state="readonly")
+            if self.epub_path:
+                self.set_same_dir_output()
+        else:
+            self.output_entry.config(state="normal")
+    
+    def set_same_dir_output(self):
+        if self.epub_path:
+            epub_dir = os.path.dirname(self.epub_path)
+            epub_name = os.path.splitext(os.path.basename(self.epub_path))[0]
+            output_dir = os.path.join(epub_dir, epub_name + "_audio")
+            self.output_var.set(output_dir)
+            self.output_path = output_dir
+    
+    def on_drop(self, event):
+        files = self.root.tk.splitlist(event.data)
+        if files and files[0].endswith('.epub'):
+            self.load_epub_file(files[0])
+    
+    def start_conversion(self):
+        if not self.epub_path:
+            messagebox.showerror("错误", "请选择EPUB文件")
+            return
+        
+        if not self.output_path:
+            messagebox.showerror("错误", "请设置输出路径")
+            return
+        
+        selected_chapters = self.get_selected_chapters()
+        if not selected_chapters:
+            messagebox.showerror("错误", "请至少选择一个章节")
+            return
+        
+        self.is_running = True
+        self.is_paused = False
+        self.update_button_states()
+        
+        # 在新线程中运行转换
+        thread = threading.Thread(target=self.run_conversion, args=(selected_chapters,))
+        thread.daemon = True
+        thread.start()
+    
+    def run_conversion(self, selected_chapters):
+        try:
+            self.converter = EpubToTTS(self.epub_path, self.output_path)
+            asyncio.run(self.converter.convert_selected_chapters(selected_chapters, self.update_progress))
+        except Exception as e:
+            messagebox.showerror("错误", f"转换失败: {str(e)}")
+        finally:
+            self.is_running = False
+            self.root.after(0, self.update_button_states)
+    
+    def update_progress(self, current, total, chapter_title, status):
+        def update_ui():
+            # 更新进度条
+            progress = (current / total) * 100 if total > 0 else 0
+            self.progress_var.set(progress)
+            self.progress_label.config(text=f"{current}/{total}")
+            
+            # 更新章节列表状态
+            for item in self.chapter_tree.get_children():
+                values = list(self.chapter_tree.item(item)["values"])
+                if values[1] == chapter_title:
+                    values[2] = status
+                    self.chapter_tree.item(item, values=values)
+                    break
+        
+        self.root.after(0, update_ui)
+    
+    def pause_conversion(self):
+        self.is_paused = True
+        if self.converter:
+            self.converter.pause()
+        self.update_button_states()
+    
+    def continue_conversion(self):
+        self.is_paused = False
+        if self.converter:
+            self.converter.resume()
+        self.update_button_states()
+    
+    def restart_conversion(self):
+        self.stop_conversion()
+        # 重置章节状态
+        for item in self.chapter_tree.get_children():
+            values = list(self.chapter_tree.item(item)["values"])
+            if values[0] == "☑":
+                values[2] = "待转换"
+                self.chapter_tree.item(item, values=values)
+        self.progress_var.set(0)
+        self.progress_label.config(text="0/0")
+        self.start_conversion()
+    
+    def stop_conversion(self):
+        self.is_running = False
+        self.is_paused = False
+        if self.converter:
+            self.converter.stop()
+        self.update_button_states()
+    
+    def update_button_states(self):
+        if self.is_running:
+            if self.is_paused:
+                self.start_btn.config(state="disabled")
+                self.pause_btn.config(state="disabled")
+                self.continue_btn.config(state="normal")
+                self.stop_btn.config(state="normal")
+            else:
+                self.start_btn.config(state="disabled")
+                self.pause_btn.config(state="normal")
+                self.continue_btn.config(state="disabled")
+                self.stop_btn.config(state="normal")
+        else:
+            self.start_btn.config(state="normal")
+            self.pause_btn.config(state="disabled")
+            self.continue_btn.config(state="disabled")
+            self.stop_btn.config(state="disabled")
+
+if __name__ == "__main__":
+    if DND_AVAILABLE:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
+    app = EpubTTSGUI(root)
+    root.mainloop()
+
+
