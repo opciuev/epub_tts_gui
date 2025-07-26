@@ -79,38 +79,49 @@ class EpubToTTS:
         communicate = edge_tts.Communicate(text, self.voice)
         await communicate.save(output_file)
     
-    async def convert_selected_chapters(self, selected_chapters, progress_callback):
-        """转换选中的章节为音频文件"""
+    async def convert_selected_chapters(self, selected_chapters, progress_callback, max_concurrent=3):
+        """转换选中的章节为音频文件，支持并发"""
         total_chapters = len(selected_chapters)
+        completed = 0
+        semaphore = asyncio.Semaphore(max_concurrent)
         
-        for i, chapter in enumerate(selected_chapters):
-            if self.is_stopped:
-                break
+        async def convert_single_chapter(chapter, index):
+            nonlocal completed
+            async with semaphore:
+                if self.is_stopped:
+                    return
                 
-            # 等待暂停状态
-            while self.is_paused and not self.is_stopped:
-                await asyncio.sleep(0.1)
-            
-            if self.is_stopped:
-                break
-            
-            progress_callback(i, total_chapters, chapter['title'], "处理中...")
-            
-            text = self.extract_chapter_text(chapter['href'])
-            
-            if not text:
-                progress_callback(i+1, total_chapters, chapter['title'], "跳过(空)")
-                continue
-            
-            safe_title = re.sub(r'[^\w\s.-]', '', chapter['title'])
-            safe_title = re.sub(r'[-\s]+', '-', safe_title)
-            output_file = f"{self.output_dir}/{safe_title}.mp3"
-            
-            try:
-                await self.text_to_speech(text, output_file)
-                progress_callback(i+1, total_chapters, chapter['title'], "完成")
-            except Exception as e:
-                progress_callback(i+1, total_chapters, chapter['title'], f"失败: {str(e)}")
+                # 等待暂停状态
+                while self.is_paused and not self.is_stopped:
+                    await asyncio.sleep(0.1)
+                
+                if self.is_stopped:
+                    return
+                
+                progress_callback(completed, total_chapters, chapter['title'], "处理中...")
+                
+                text = self.extract_chapter_text(chapter['href'])
+                
+                if not text:
+                    completed += 1
+                    progress_callback(completed, total_chapters, chapter['title'], "跳过(空)")
+                    return
+                
+                safe_title = re.sub(r'[^\w\s.-]', '', chapter['title'])
+                safe_title = re.sub(r'[-\s]+', '-', safe_title)
+                output_file = f"{self.output_dir}/{safe_title}.mp3"
+                
+                try:
+                    await self.text_to_speech(text, output_file)
+                    completed += 1
+                    progress_callback(completed, total_chapters, chapter['title'], "完成")
+                except Exception as e:
+                    completed += 1
+                    progress_callback(completed, total_chapters, chapter['title'], f"失败: {str(e)}")
+        
+        # 创建并发任务
+        tasks = [convert_single_chapter(chapter, i) for i, chapter in enumerate(selected_chapters)]
+        await asyncio.gather(*tasks, return_exceptions=True)
     
     async def convert_with_callback(self, progress_callback):
         """转换整个EPUB为音频文件，带进度回调"""
@@ -126,3 +137,4 @@ class EpubToTTS:
     def stop(self):
         self.is_stopped = True
         self.is_paused = False
+

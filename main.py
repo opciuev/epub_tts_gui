@@ -61,10 +61,23 @@ class EpubTTSGUI:
         
         ttk.Button(output_input_frame, text="选择路径", command=self.select_output).pack(side=tk.RIGHT, padx=(5,0))
         
-        # 同目录选项
+        # 同目录选项和并发设置
+        options_frame = ttk.Frame(output_frame)
+        options_frame.pack(fill=tk.X, pady=5)
+        
         self.same_dir_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(output_frame, text="在EPUB同目录下创建同名文件夹", 
-                       variable=self.same_dir_var, command=self.toggle_same_dir).pack(anchor=tk.W, pady=5)
+        ttk.Checkbutton(options_frame, text="在EPUB同目录下创建同名文件夹", 
+                       variable=self.same_dir_var, command=self.toggle_same_dir).pack(side=tk.LEFT)
+        
+        # 并发线程数选择
+        concurrent_frame = ttk.Frame(options_frame)
+        concurrent_frame.pack(side=tk.RIGHT)
+        
+        ttk.Label(concurrent_frame, text="并发线程数:").pack(side=tk.LEFT, padx=(20,5))
+        self.concurrent_var = tk.StringVar(value="3")
+        concurrent_combo = ttk.Combobox(concurrent_frame, textvariable=self.concurrent_var, 
+                                       values=["1", "2", "3", "4", "5", "6"], width=5, state="readonly")
+        concurrent_combo.pack(side=tk.LEFT)
         
         # 章节选择区域
         chapter_frame = ttk.LabelFrame(self.root, text="章节选择", padding="10")
@@ -148,6 +161,8 @@ class EpubTTSGUI:
             self.load_epub_file(file_path)
     
     def load_epub_file(self, file_path):
+        # 统一路径格式
+        file_path = os.path.normpath(file_path)
         self.file_var.set(file_path)
         self.epub_path = file_path
         if self.same_dir_var.get():
@@ -204,13 +219,15 @@ class EpubTTSGUI:
         return selected_chapters
     
     def select_output(self):
-        if self.same_dir_var.get():
-            return
-        
         dir_path = filedialog.askdirectory(title="选择输出目录")
         if dir_path:
+            # 统一路径格式
+            dir_path = os.path.normpath(dir_path)
             self.output_var.set(dir_path)
             self.output_path = dir_path
+            # 用户手动选择路径时，自动取消同目录选项
+            self.same_dir_var.set(False)
+            self.output_entry.config(state="normal")
     
     def toggle_same_dir(self):
         if self.same_dir_var.get():
@@ -219,12 +236,15 @@ class EpubTTSGUI:
                 self.set_same_dir_output()
         else:
             self.output_entry.config(state="normal")
+            self.output_var.set("")  # 清空输出路径
     
     def set_same_dir_output(self):
         if self.epub_path:
             epub_dir = os.path.dirname(self.epub_path)
             epub_name = os.path.splitext(os.path.basename(self.epub_path))[0]
             output_dir = os.path.join(epub_dir, epub_name + "_audio")
+            # 统一路径格式
+            output_dir = os.path.normpath(output_dir)
             self.output_var.set(output_dir)
             self.output_path = output_dir
     
@@ -238,7 +258,9 @@ class EpubTTSGUI:
             messagebox.showerror("错误", "请选择EPUB文件")
             return
         
-        if not self.output_path:
+        # 使用输入框中的实际路径，而不是存储的变量
+        output_path = self.output_var.get().strip()
+        if not output_path:
             messagebox.showerror("错误", "请设置输出路径")
             return
         
@@ -252,14 +274,15 @@ class EpubTTSGUI:
         self.update_button_states()
         
         # 在新线程中运行转换
-        thread = threading.Thread(target=self.run_conversion, args=(selected_chapters,))
+        thread = threading.Thread(target=self.run_conversion, args=(selected_chapters, output_path))
         thread.daemon = True
         thread.start()
     
-    def run_conversion(self, selected_chapters):
+    def run_conversion(self, selected_chapters, output_path):
         try:
-            self.converter = EpubToTTS(self.epub_path, self.output_path)
-            asyncio.run(self.converter.convert_selected_chapters(selected_chapters, self.update_progress))
+            max_concurrent = int(self.concurrent_var.get())
+            self.converter = EpubToTTS(self.epub_path, output_path)
+            asyncio.run(self.converter.convert_selected_chapters(selected_chapters, self.update_progress, max_concurrent))
         except Exception as e:
             messagebox.showerror("错误", f"转换失败: {str(e)}")
         finally:
@@ -339,5 +362,12 @@ if __name__ == "__main__":
         root = tk.Tk()
     app = EpubTTSGUI(root)
     root.mainloop()
+
+
+
+
+
+
+
 
 
