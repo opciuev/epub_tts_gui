@@ -1,3 +1,4 @@
 edge-tts
 beautifulsoup4
 tkinterdnd2
+pydub

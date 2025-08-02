@@ -5,6 +5,9 @@ import edge_tts
 import asyncio
 import os
 import re
+from pydub import AudioSegment
+import queue
+import threading
 
 class EpubToTTS:
     def __init__(self, epub_path, output_dir):
@@ -13,18 +16,177 @@ class EpubToTTS:
         self.voice = "zh-CN-XiaoxiaoNeural"
         self.is_paused = False
         self.is_stopped = False
+        self.chunk_size = 2000  # 每段文本字符数
         
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
-    
+
+    def split_text(self, text, chunk_size=2000):
+        """将长文本分割成小段"""
+        if len(text) <= chunk_size:
+            return [text]
+        
+        chunks = []
+        sentences = re.split(r'[。！？\n]', text)
+        current_chunk = ""
+        
+        for sentence in sentences:
+            if len(current_chunk + sentence) <= chunk_size:
+                current_chunk += sentence + "。"
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + "。"
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+        
+        return chunks
+
+    async def text_to_speech_chunk(self, text, output_file, max_retries=3):
+        """将单个文本段转换为语音，支持重试"""
+        for attempt in range(max_retries):
+            try:
+                communicate = edge_tts.Communicate(text, self.voice)
+                await asyncio.wait_for(communicate.save(output_file), timeout=60.0)
+                return True
+            except Exception as e:
+                print(f"TTS段转换失败 (尝试 {attempt+1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)  # 等待2秒后重试
+                else:
+                    print(f"TTS段最终失败: {str(e)}")
+                    return False
+
+    async def text_to_speech(self, text, output_file):
+        """生产者-消费者模式的TTS转换"""
+        print(f"TTS开始: 文本长度={len(text)}, 输出文件={output_file}")
+        
+        chunks = self.split_text(text, self.chunk_size)
+        print(f"文本分割为 {len(chunks)} 段")
+        
+        if len(chunks) == 1:
+            try:
+                communicate = edge_tts.Communicate(text, self.voice)
+                await asyncio.wait_for(communicate.save(output_file), timeout=120.0)
+                print(f"TTS保存完成: {output_file}")
+                return
+            except Exception as e:
+                print(f"TTS转换失败: {str(e)}")
+                raise
+        
+        # 生产者-消费者模式
+        task_queue = asyncio.Queue()
+        result_dict = {}
+        
+        # 生产者：将任务放入队列
+        for i, chunk in enumerate(chunks):
+            await task_queue.put((i, chunk))
+        
+        # 添加结束标记
+        for _ in range(6):  # 6个消费者
+            await task_queue.put(None)
+        
+        # 消费者：处理TTS转换
+        async def consumer():
+            while True:
+                item = await task_queue.get()
+                if item is None:
+                    break
+                
+                index, chunk = item
+                temp_file = f"{output_file}.temp_{index}.mp3"
+                print(f"转换段 {index+1}/{len(chunks)}")
+                
+                success = await self.text_to_speech_chunk(chunk, temp_file)
+                if success:
+                    result_dict[index] = temp_file
+                
+                task_queue.task_done()
+        
+        # 启动多个消费者
+        consumers = [asyncio.create_task(consumer()) for _ in range(6)]
+        
+        # 等待所有任务完成
+        await asyncio.gather(*consumers)
+        
+        # 按顺序合并音频
+        temp_files = [(i, result_dict[i]) for i in sorted(result_dict.keys())]
+        success_count = len(temp_files)
+        failed_count = len(chunks) - success_count
+        
+        if failed_count > 0:
+            print(f"有 {failed_count} 段转换失败，成功 {success_count} 段")
+            if success_count == 0:
+                raise Exception("所有段都转换失败")
+        
+        # 合并音频文件
+        try:
+            await asyncio.sleep(1)
+            self.simple_merge_audio(temp_files, output_file)
+            print(f"音频合并完成: {output_file}")
+        except Exception as e:
+            print(f"音频合并失败: {str(e)}")
+            raise
+        finally:
+            # 清理临时文件
+            await asyncio.sleep(2)
+            for _, temp_file in temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except Exception as e:
+                    print(f"清理临时文件失败: {temp_file}, {str(e)}")
+
+    def simple_merge_audio(self, temp_files, output_file):
+        """简单的音频合并方法，不依赖ffmpeg"""
+        try:
+            # 按索引排序
+            temp_files.sort(key=lambda x: x[0])
+            
+            # 读取所有音频数据并合并
+            with open(output_file, 'wb') as outfile:
+                for index, temp_file in temp_files:
+                    if os.path.exists(temp_file):
+                        with open(temp_file, 'rb') as infile:
+                            outfile.write(infile.read())
+            
+            print(f"简单音频合并完成: {output_file}")
+        except Exception as e:
+            print(f"简单音频合并失败: {str(e)}")
+            raise
+
+    def merge_audio_files(self, temp_files, output_file):
+        """使用pydub合并音频文件（需要ffmpeg）"""
+        try:
+            temp_files.sort(key=lambda x: x[0])
+            
+            combined = AudioSegment.empty()
+            for index, temp_file in temp_files:
+                if os.path.exists(temp_file):
+                    audio = AudioSegment.from_mp3(temp_file)
+                    combined += audio
+                    combined += AudioSegment.silent(duration=300)
+            
+            combined.export(output_file, format="mp3")
+        except Exception as e:
+            print(f"pydub合并失败: {str(e)}")
+            raise
+
     def get_toc_structure(self):
         """获取目录结构"""
         with zipfile.ZipFile(self.epub_path, 'r') as zip_ref:
+            print("=== EPUB文件列表 ===")
+            for file in zip_ref.namelist():
+                print(f"文件: {file}")
+            
             ncx_path = None
             for file in zip_ref.namelist():
                 if file.endswith('toc.ncx'):
                     ncx_path = file
                     break
+            
+            print(f"找到目录文件: {ncx_path}")
             
             if not ncx_path:
                 return []
@@ -37,6 +199,7 @@ class EpubToTTS:
                 ns = {'': 'http://www.daisy.org/z3986/2005/ncx/'}
                 nav_points = root.findall('.//navPoint', ns)
                 
+                print(f"=== 目录结构 ===")
                 chapters = []
                 for i, nav_point in enumerate(nav_points, 1):
                     title_elem = nav_point.find('navLabel/text', ns)
@@ -46,82 +209,152 @@ class EpubToTTS:
                         title = f"{i}.{title_elem.text}"
                         href = content_elem.get('src')
                         chapters.append({'title': title, 'href': href})
+                        print(f"章节 {i}: 标题='{title}', 链接='{href}'")
                 
                 return chapters
-    
+
     def extract_chapter_text(self, chapter_href):
         """提取章节文本内容"""
+        print(f"提取章节: {chapter_href}")
+        
         with zipfile.ZipFile(self.epub_path, 'r') as zip_ref:
-            chapter_path = chapter_href.split('#')[0]
+            # 分离文件路径和锚点
+            if '#' in chapter_href:
+                chapter_path, anchor = chapter_href.split('#', 1)
+            else:
+                chapter_path = chapter_href
+                anchor = None
             
-            full_path = None
-            for file in zip_ref.namelist():
-                if file.endswith(chapter_path):
-                    full_path = file
-                    break
+            print(f"章节路径: {chapter_path}, 锚点: {anchor}")
             
-            if not full_path:
+            # 直接使用章节路径
+            if chapter_path not in zip_ref.namelist():
+                print(f"未找到章节文件: {chapter_path}")
                 return ""
             
-            with zip_ref.open(full_path) as file:
+            with zip_ref.open(chapter_path) as file:
                 content = file.read().decode('utf-8')
                 soup = BeautifulSoup(content, 'html.parser')
                 
+                # 移除脚本和样式
                 for script in soup(["script", "style"]):
                     script.decompose()
                 
-                text = soup.get_text()
+                if anchor:
+                    # 处理filepos类型的锚点
+                    if anchor.startswith('filepos'):
+                        # 对于filepos锚点，我们需要找到对应的位置
+                        # 先获取整个文档的文本
+                        full_text = soup.get_text()
+                        
+                        # 尝试通过HTML结构来分割章节
+                        # 查找所有可能的章节分隔符
+                        chapter_markers = soup.find_all(['h1', 'h2', 'h3', 'div'], 
+                                                       class_=lambda x: x and ('chapter' in x.lower() or 'title' in x.lower()))
+                        
+                        if not chapter_markers:
+                            # 如果没找到明确的章节标记，尝试查找包含章节标题的元素
+                            chapter_markers = soup.find_all(['p', 'div'], 
+                                                           string=lambda text: text and any(keyword in text for keyword in ['第', '章', '前言', '导言', '序']))
+                        
+                        # 如果还是没找到，就返回整个文档的文本
+                        if not chapter_markers:
+                            text = full_text
+                        else:
+                            # 尝试根据锚点位置估算章节内容
+                            # 这里简化处理：返回整个文档内容
+                            # 实际应用中可能需要更复杂的逻辑来精确定位
+                            text = full_text
+                    else:
+                        # 处理普通锚点
+                        target = soup.find(id=anchor) or soup.find('a', {'name': anchor})
+                        if target:
+                            # 从锚点开始提取内容
+                            text_parts = []
+                            current = target
+                            while current:
+                                if hasattr(current, 'get_text'):
+                                    text_parts.append(current.get_text())
+                                current = current.next_sibling
+                            text = ' '.join(text_parts) if text_parts else soup.get_text()
+                        else:
+                            text = soup.get_text()
+                else:
+                    text = soup.get_text()
+                
+                # 清理文本
                 text = re.sub(r'\s+', ' ', text).strip()
+                print(f"提取文本长度: {len(text)} 字符")
+                
+                # 打印文本开头用于调试
+                preview = text[:200] + "..." if len(text) > 200 else text
+                print(f"文本预览: {preview}")
+                
                 return text
-    
-    async def text_to_speech(self, text, output_file):
-        """将文本转换为语音"""
-        communicate = edge_tts.Communicate(text, self.voice)
-        await communicate.save(output_file)
-    
+
     async def convert_selected_chapters(self, selected_chapters, progress_callback, max_concurrent=3):
-        """转换选中的章节为音频文件，支持并发"""
+        print(f"=== 开始转换章节 ===")
+        print(f"总章节数: {len(selected_chapters)}")
+        
         total_chapters = len(selected_chapters)
         completed = 0
         semaphore = asyncio.Semaphore(max_concurrent)
         
         async def convert_single_chapter(chapter, index):
             nonlocal completed
+            print(f"开始处理章节 {index+1}: {chapter['title']}")
+            
             async with semaphore:
                 if self.is_stopped:
+                    print(f"章节 {index+1} 被停止")
                     return
                 
-                # 等待暂停状态
                 while self.is_paused and not self.is_stopped:
                     await asyncio.sleep(0.1)
                 
                 if self.is_stopped:
+                    print(f"章节 {index+1} 被停止")
                     return
                 
                 progress_callback(completed, total_chapters, chapter['title'], "处理中...")
                 
-                text = self.extract_chapter_text(chapter['href'])
+                print(f"提取章节文本: {chapter['title']}")
+                # 获取下一章节信息用于更好的文本分割
+                next_chapter = selected_chapters[index + 1] if index + 1 < len(selected_chapters) else None
+                next_href = next_chapter['href'] if next_chapter else None
+                
+                # 使用改进的文本提取方法
+                text = self.extract_chapter_text_by_position(chapter['href'], next_href)
+                print(f"文本提取完成，长度: {len(text)}")
                 
                 if not text:
                     completed += 1
+                    print(f"章节 {index+1} 内容为空，跳过")
                     progress_callback(completed, total_chapters, chapter['title'], "跳过(空)")
                     return
                 
                 safe_title = re.sub(r'[^\w\s.-]', '', chapter['title'])
                 safe_title = re.sub(r'[-\s]+', '-', safe_title)
-                output_file = f"{self.output_dir}/{safe_title}.mp3"
+                output_file = os.path.join(self.output_dir, f"{safe_title}.mp3")
+                print(f"输出文件: {output_file}")
                 
                 try:
+                    print(f"开始TTS转换: {chapter['title']}")
                     await self.text_to_speech(text, output_file)
                     completed += 1
+                    print(f"章节 {index+1} 转换完成")
                     progress_callback(completed, total_chapters, chapter['title'], "完成")
                 except Exception as e:
                     completed += 1
+                    print(f"章节 {index+1} 转换失败: {str(e)}")
                     progress_callback(completed, total_chapters, chapter['title'], f"失败: {str(e)}")
         
-        # 创建并发任务
+        print("创建并发任务...")
         tasks = [convert_single_chapter(chapter, i) for i, chapter in enumerate(selected_chapters)]
+        print(f"任务数量: {len(tasks)}")
+        
         await asyncio.gather(*tasks, return_exceptions=True)
+        print("=== 所有章节处理完成 ===")
     
     async def convert_with_callback(self, progress_callback):
         """转换整个EPUB为音频文件，带进度回调"""
@@ -137,4 +370,14 @@ class EpubToTTS:
     def stop(self):
         self.is_stopped = True
         self.is_paused = False
+
+
+
+
+
+
+
+
+
+
 

@@ -4,6 +4,7 @@ import os
 import asyncio
 import threading
 from epub_converter import EpubToTTS
+import re
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -133,7 +134,11 @@ class EpubTTSGUI:
         self.restart_btn.pack(side=tk.LEFT, padx=(0,5))
         
         self.stop_btn = ttk.Button(control_frame, text="结束", command=self.stop_conversion, state="disabled")
-        self.stop_btn.pack(side=tk.LEFT)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0,5))
+        
+        # 新增：保存文本按钮
+        self.save_text_btn = ttk.Button(control_frame, text="保存文本", command=self.save_selected_text)
+        self.save_text_btn.pack(side=tk.LEFT)
         
         # 进度条
         progress_frame = ttk.Frame(self.root, padding="10")
@@ -254,49 +259,74 @@ class EpubTTSGUI:
             self.load_epub_file(files[0])
     
     def start_conversion(self):
+        print("=== 开始转换流程 ===")
         if not self.epub_path:
+            print("错误: 未选择EPUB文件")
             messagebox.showerror("错误", "请选择EPUB文件")
             return
         
-        # 使用输入框中的实际路径，而不是存储的变量
         output_path = self.output_var.get().strip()
+        print(f"EPUB路径: {self.epub_path}")
+        print(f"输出路径: {output_path}")
+        
         if not output_path:
+            print("错误: 未设置输出路径")
             messagebox.showerror("错误", "请设置输出路径")
             return
         
         selected_chapters = self.get_selected_chapters()
+        print(f"选中章节数: {len(selected_chapters)}")
+        
         if not selected_chapters:
+            print("错误: 未选择章节")
             messagebox.showerror("错误", "请至少选择一个章节")
             return
         
+        print("设置运行状态...")
         self.is_running = True
         self.is_paused = False
         self.update_button_states()
         
-        # 在新线程中运行转换
+        print("启动转换线程...")
         thread = threading.Thread(target=self.run_conversion, args=(selected_chapters, output_path))
         thread.daemon = True
         thread.start()
-    
+        print("转换线程已启动")
+
     def run_conversion(self, selected_chapters, output_path):
+        print(f"=== 转换线程开始 ===")
+        print(f"章节数: {len(selected_chapters)}")
+        print(f"输出目录: {output_path}")
+        
         try:
             max_concurrent = int(self.concurrent_var.get())
+            print(f"并发数: {max_concurrent}")
+            
+            print("创建转换器...")
             self.converter = EpubToTTS(self.epub_path, output_path)
+            print("转换器创建成功")
+            
+            print("开始异步转换...")
             asyncio.run(self.converter.convert_selected_chapters(selected_chapters, self.update_progress, max_concurrent))
+            print("转换完成")
+            
         except Exception as e:
+            print(f"转换异常: {str(e)}")
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("错误", f"转换失败: {str(e)}")
         finally:
+            print("转换线程结束")
             self.is_running = False
             self.root.after(0, self.update_button_states)
-    
+
     def update_progress(self, current, total, chapter_title, status):
+        print(f"进度更新: {current}/{total} - {chapter_title} - {status}")
         def update_ui():
-            # 更新进度条
             progress = (current / total) * 100 if total > 0 else 0
             self.progress_var.set(progress)
             self.progress_label.config(text=f"{current}/{total}")
             
-            # 更新章节列表状态
             for item in self.chapter_tree.get_children():
                 values = list(self.chapter_tree.item(item)["values"])
                 if values[1] == chapter_title:
@@ -355,6 +385,55 @@ class EpubTTSGUI:
             self.continue_btn.config(state="disabled")
             self.stop_btn.config(state="disabled")
 
+    def save_selected_text(self):
+        """保存选中章节的文本到文件"""
+        if not self.epub_path:
+            messagebox.showerror("错误", "请先选择EPUB文件")
+            return
+        
+        selected_chapters = self.get_selected_chapters()
+        if not selected_chapters:
+            messagebox.showerror("错误", "请至少选择一个章节")
+            return
+        
+        # 根据选中章节数量自动生成文件名
+        epub_name = os.path.splitext(os.path.basename(self.epub_path))[0]
+        if len(selected_chapters) == 1:
+            # 单个章节：书名_章节名.txt
+            chapter_name = re.sub(r'[^\w\s.-]', '', selected_chapters[0]['title'])
+            default_name = f"{epub_name}_{chapter_name}.txt"
+        else:
+            # 多个章节：书名_选中章节数.txt
+            default_name = f"{epub_name}_选中{len(selected_chapters)}章节.txt"
+        
+        # 选择保存位置
+        save_path = filedialog.asksaveasfilename(
+            title="保存文本文件",
+            initialfile=default_name,
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
+        )
+        
+        if not save_path:
+            return
+        
+        try:
+            temp_converter = EpubToTTS(self.epub_path, "temp")
+            
+            with open(save_path, 'w', encoding='utf-8') as f:
+                for i, chapter in enumerate(selected_chapters):
+                    f.write(f"=== 章节 {i+1}: {chapter['title']} ===\n\n")
+                    
+                    text = temp_converter.extract_chapter_text(chapter['href'])
+                    f.write(f"原始文本长度: {len(text)} 字符\n\n")
+                    f.write(text)
+                    f.write("\n\n" + "="*50 + "\n\n")
+            
+            messagebox.showinfo("成功", f"文本已保存到: {save_path}")
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"保存文本失败: {str(e)}")
+
 if __name__ == "__main__":
     if DND_AVAILABLE:
         root = TkinterDnD.Tk()
@@ -362,6 +441,11 @@ if __name__ == "__main__":
         root = tk.Tk()
     app = EpubTTSGUI(root)
     root.mainloop()
+
+
+
+
+
 
 
 
