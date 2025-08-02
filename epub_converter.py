@@ -213,84 +213,63 @@ class EpubToTTS:
                 
                 return chapters
 
-    def extract_chapter_text(self, chapter_href):
-        """提取章节文本内容"""
-        print(f"提取章节: {chapter_href}")
+    def extract_chapter_text_by_position(self, chapter_href, next_chapter_href=None):
+        """根据位置提取章节文本"""
+        print(f"按位置提取章节: {chapter_href}")
         
-        with zipfile.ZipFile(self.epub_path, 'r') as zip_ref:
-            # 分离文件路径和锚点
-            if '#' in chapter_href:
-                chapter_path, anchor = chapter_href.split('#', 1)
-            else:
-                chapter_path = chapter_href
-                anchor = None
-            
-            print(f"章节路径: {chapter_path}, 锚点: {anchor}")
-            
-            # 直接使用章节路径
-            if chapter_path not in zip_ref.namelist():
-                print(f"未找到章节文件: {chapter_path}")
-                return ""
-            
-            with zip_ref.open(chapter_path) as file:
-                content = file.read().decode('utf-8')
-                soup = BeautifulSoup(content, 'html.parser')
+        try:
+            with zipfile.ZipFile(self.epub_path, 'r') as zip_ref:
+                chapter_path = chapter_href.split('#')[0]
+                print(f"章节文件路径: {chapter_path}")
+                
+                with zip_ref.open(chapter_path) as file:
+                    content = file.read().decode('utf-8')
+                    print(f"文件内容长度: {len(content)} 字符")
+                
+                # 如果有下一章节，尝试在同一文件中分割
+                if next_chapter_href and next_chapter_href.startswith(chapter_path):
+                    current_pos = chapter_href.split('#filepos')[1] if '#filepos' in chapter_href else '0'
+                    next_pos = next_chapter_href.split('#filepos')[1] if '#filepos' in next_chapter_href else str(len(content))
+                    
+                    print(f"当前位置: {current_pos}, 下一位置: {next_pos}")
+                    
+                    try:
+                        start_pos = int(current_pos)
+                        end_pos = int(next_pos)
+                        
+                        print(f"提取范围: {start_pos} - {end_pos}")
+                        # 提取指定范围的内容
+                        chapter_content = content[start_pos:end_pos]
+                        print(f"章节内容长度: {len(chapter_content)} 字符")
+                        soup = BeautifulSoup(chapter_content, 'html.parser')
+                    except Exception as e:
+                        print(f"位置解析失败: {e}, 使用整个文件")
+                        soup = BeautifulSoup(content, 'html.parser')
+                else:
+                    print("使用整个文件内容")
+                    soup = BeautifulSoup(content, 'html.parser')
                 
                 # 移除脚本和样式
                 for script in soup(["script", "style"]):
                     script.decompose()
                 
-                if anchor:
-                    # 处理filepos类型的锚点
-                    if anchor.startswith('filepos'):
-                        # 对于filepos锚点，我们需要找到对应的位置
-                        # 先获取整个文档的文本
-                        full_text = soup.get_text()
-                        
-                        # 尝试通过HTML结构来分割章节
-                        # 查找所有可能的章节分隔符
-                        chapter_markers = soup.find_all(['h1', 'h2', 'h3', 'div'], 
-                                                       class_=lambda x: x and ('chapter' in x.lower() or 'title' in x.lower()))
-                        
-                        if not chapter_markers:
-                            # 如果没找到明确的章节标记，尝试查找包含章节标题的元素
-                            chapter_markers = soup.find_all(['p', 'div'], 
-                                                           string=lambda text: text and any(keyword in text for keyword in ['第', '章', '前言', '导言', '序']))
-                        
-                        # 如果还是没找到，就返回整个文档的文本
-                        if not chapter_markers:
-                            text = full_text
-                        else:
-                            # 尝试根据锚点位置估算章节内容
-                            # 这里简化处理：返回整个文档内容
-                            # 实际应用中可能需要更复杂的逻辑来精确定位
-                            text = full_text
-                    else:
-                        # 处理普通锚点
-                        target = soup.find(id=anchor) or soup.find('a', {'name': anchor})
-                        if target:
-                            # 从锚点开始提取内容
-                            text_parts = []
-                            current = target
-                            while current:
-                                if hasattr(current, 'get_text'):
-                                    text_parts.append(current.get_text())
-                                current = current.next_sibling
-                            text = ' '.join(text_parts) if text_parts else soup.get_text()
-                        else:
-                            text = soup.get_text()
-                else:
-                    text = soup.get_text()
-                
-                # 清理文本
+                text = soup.get_text()
                 text = re.sub(r'\s+', ' ', text).strip()
-                print(f"提取文本长度: {len(text)} 字符")
                 
-                # 打印文本开头用于调试
-                preview = text[:200] + "..." if len(text) > 200 else text
-                print(f"文本预览: {preview}")
+                print(f"最终提取文本长度: {len(text)} 字符")
+                if len(text) > 0:
+                    preview = text[:200] + "..." if len(text) > 200 else text
+                    print(f"文本预览: {preview}")
+                else:
+                    print("警告: 提取的文本为空!")
                 
                 return text
+                
+        except Exception as e:
+            print(f"提取章节文本时发生异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
 
     async def convert_selected_chapters(self, selected_chapters, progress_callback, max_concurrent=3):
         print(f"=== 开始转换章节 ===")
@@ -370,6 +349,7 @@ class EpubToTTS:
     def stop(self):
         self.is_stopped = True
         self.is_paused = False
+
 
 
 

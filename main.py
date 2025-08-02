@@ -396,17 +396,21 @@ class EpubTTSGUI:
             messagebox.showerror("错误", "请至少选择一个章节")
             return
         
+        # 如果正在转换，警告用户
+        if self.is_running:
+            result = messagebox.askyesno("警告", 
+                "当前正在进行转换，保存文本可能会影响转换进程。\n是否继续？")
+            if not result:
+                return
+        
         # 根据选中章节数量自动生成文件名
         epub_name = os.path.splitext(os.path.basename(self.epub_path))[0]
         if len(selected_chapters) == 1:
-            # 单个章节：书名_章节名.txt
             chapter_name = re.sub(r'[^\w\s.-]', '', selected_chapters[0]['title'])
             default_name = f"{epub_name}_{chapter_name}.txt"
         else:
-            # 多个章节：书名_选中章节数.txt
             default_name = f"{epub_name}_选中{len(selected_chapters)}章节.txt"
         
-        # 选择保存位置
         save_path = filedialog.asksaveasfilename(
             title="保存文本文件",
             initialfile=default_name,
@@ -418,18 +422,31 @@ class EpubTTSGUI:
             return
         
         try:
-            temp_converter = EpubToTTS(self.epub_path, "temp")
-            
-            with open(save_path, 'w', encoding='utf-8') as f:
-                for i, chapter in enumerate(selected_chapters):
-                    f.write(f"=== 章节 {i+1}: {chapter['title']} ===\n\n")
+            # 在单独线程中执行，避免阻塞UI和影响转换
+            def save_text_thread():
+                try:
+                    temp_converter = EpubToTTS(self.epub_path, "temp")
                     
-                    text = temp_converter.extract_chapter_text(chapter['href'])
-                    f.write(f"原始文本长度: {len(text)} 字符\n\n")
-                    f.write(text)
-                    f.write("\n\n" + "="*50 + "\n\n")
+                    with open(save_path, 'w', encoding='utf-8') as f:
+                        for i, chapter in enumerate(selected_chapters):
+                            f.write(f"=== 章节 {i+1}: {chapter['title']} ===\n\n")
+                            
+                            text = temp_converter.extract_chapter_text(chapter['href'])
+                            f.write(f"原始文本长度: {len(text)} 字符\n\n")
+                            f.write(text)
+                            f.write("\n\n" + "="*50 + "\n\n")
+                    
+                    # 在主线程中显示成功消息
+                    self.root.after(0, lambda: messagebox.showinfo("成功", f"文本已保存到: {save_path}"))
+                    
+                except Exception as e:
+                    # 在主线程中显示错误消息
+                    self.root.after(0, lambda: messagebox.showerror("错误", f"保存文本失败: {str(e)}"))
             
-            messagebox.showinfo("成功", f"文本已保存到: {save_path}")
+            # 启动保存线程
+            save_thread = threading.Thread(target=save_text_thread)
+            save_thread.daemon = True
+            save_thread.start()
             
         except Exception as e:
             messagebox.showerror("错误", f"保存文本失败: {str(e)}")
@@ -441,6 +458,7 @@ if __name__ == "__main__":
         root = tk.Tk()
     app = EpubTTSGUI(root)
     root.mainloop()
+
 
 
 
